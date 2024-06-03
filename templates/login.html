@@ -1,0 +1,67 @@
+{% from "bootstrap5/form.html" import render_form %}
+{% block content %}
+{% include "header.html" %}
+
+<!-- Page Header -->
+<header
+    class="masthead"
+    style="background-image: url('../static/assets/img/login-bg.jpg')"
+>
+    <div class="container position-relative px-4 px-lg-5">
+        <div class="row gx-4 gx-lg-5 justify-content-center">
+            <div class="col-md-10 col-lg-8 col-xl-7">
+                <div class="page-heading">
+                    <h1>Log In</h1>
+                    <span class="subheading">Welcome Back!</span>
+                </div>
+            </div>
+        </div>
+    </div>
+</header>
+
+<main class="mb-4">
+    <div class="container">
+        <div class="row justify-content-center">
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-header text-center">
+                        <h2 class="card-title">Login</h2>
+                    </div>
+                    <div class="card-body">
+                        <form action="{{ url_for('login') }}" method="POST">
+                            {{ form.hidden_tag() }}
+
+                            {% if error %}
+                            <p class="text-danger text-center">{{ error }}</p>
+                            {% endif %}
+
+                            <div class="form-group">
+                                {{ form.email.label(class="form-label") }}
+                                {{ form.email(class="form-control", size=32) }}
+                                {% for error in form.email.errors %}
+                                <div class="text-danger">[{{ error }}]</div>
+                                {% endfor %}
+                            </div>
+                            <div class="form-group">
+                                {{ form.password.label(class="form-label") }}
+                                {{ form.password(class="form-control", size=32) }}
+                                {% for error in form.password.errors %}
+                                <div class="text-danger">[{{ error }}]</div>
+                                {% endfor %}
+                            </div>
+
+                            <br>
+                            <div class="form-group text-center">
+                                {{ form.submit(class="btn btn-primary btn-lg btn-block") }}
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</main>
+
+{% include "footer.html" %}
+{% endblock %}
+5

@@ -1,18 +1,28 @@
-from flask import Flask, render_template, redirect, url_for, request
-from flask_bootstrap import Bootstrap5
-from flask_sqlalchemy import SQLAlchemy
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
-from sqlalchemy import Integer, String, Text, create_engine
-from flask_wtf import FlaskForm
-from wtforms import StringField, SubmitField
-from wtforms.validators import DataRequired, URL
-from flask_ckeditor import CKEditor, CKEditorField
 from datetime import date
+from functools import wraps
+
+from flask import Flask, abort, render_template, redirect, url_for, flash, session
+from flask_bootstrap import Bootstrap5
+from flask_ckeditor import CKEditor, CKEditorField
+from flask_login import UserMixin, login_user, LoginManager, current_user, logout_user, login_required
+from flask_sqlalchemy import SQLAlchemy
+from flask_wtf import FlaskForm
+from sqlalchemy import Integer, String, Text
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from werkzeug.security import generate_password_hash, check_password_hash
+from wtforms.fields.simple import StringField, SubmitField
+from wtforms.validators import DataRequired, URL
+
+from forms import CreatePostForm
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = '8BYkEfBA6O6donzWlSihBXox7C0sKR6b'
 ckeditor = CKEditor(app)
 Bootstrap5(app)
+
+login_manager = LoginManager()
+login_manager.init_app(app)
+login_manager.login_view = 'login'
 
 
 # CREATE DATABASE
@@ -20,14 +30,16 @@ class Base(DeclarativeBase):
     pass
 
 
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///posts.db'
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///post.db'
 db = SQLAlchemy(model_class=Base)
 db.init_app(app)
 
 
-# CONFIGURE TABLE
+# CONFIGURE TABLES
 class BlogPost(db.Model):
+    __tablename__ = "blog_posts"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    author_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
     title: Mapped[str] = mapped_column(String(250), unique=True, nullable=False)
     subtitle: Mapped[str] = mapped_column(String(250), nullable=False)
     date: Mapped[str] = mapped_column(String(250), nullable=False)
@@ -35,18 +47,13 @@ class BlogPost(db.Model):
     author: Mapped[str] = mapped_column(String(250), nullable=False)
     img_url: Mapped[str] = mapped_column(String(250), nullable=False)
 
-class DeletedPost(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    title = db.Column(db.String(250), nullable=False)
-    subtitle = db.Column(db.String(250), nullable=False)
-    date = db.Column(db.String(250), nullable=False)
-    body = db.Column(db.Text, nullable=False)
-    author = db.Column(db.String(250), nullable=False)
-    img_url = db.Column(db.String(250), nullable=False)
 
-    def __repr__(self):
-        return f"<DeletedPost {self.id}>"
-
+class User(UserMixin, db.Model):
+    __tablename__ = 'users'
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(50), unique=True, nullable=False)
+    email: Mapped[str] = mapped_column(String(120), unique=True, nullable=False)
+    password: Mapped[str] = mapped_column(String(60), nullable=False)
 
 class NewPost(FlaskForm):
     title = StringField("Blog Post Title", validators=[DataRequired()])
@@ -57,34 +64,84 @@ class NewPost(FlaskForm):
     submit = SubmitField("Submit Post")
 
 
-with app.app_context():
-    db.create_all()
+def admin_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if 'user_id' not in session or session['user_id'] != 1:
+            abort(403)  # Forbidden
+        return f(*args, **kwargs)
+
+    return decorated_function
 
 
-@app.route('/', methods=['GET'])
+@app.route('/register', methods=['GET', 'POST'])
+def register():
+    form = CreatePostForm()
+    if form.validate_on_submit():
+        hashed_password = generate_password_hash(password=form.password.data, method='pbkdf2:sha256',
+                                                 salt_length=8)
+        if db.session.execute(db.select(User).filter(User.email == form.email.data)).scalars().all():
+            flash('Email already exists!!')
+            # Change this
+            return redirect(url_for('get_all_posts'))
+        new_user = User(name=form.name.data, email=form.email.data, password=hashed_password)
+        db.session.add(new_user)
+        db.session.commit()
+        return redirect(url_for('get_all_posts'))
+    return render_template("register.html", form=form)
+
+
+@login_manager.user_loader
+def load_user(user_id):
+    return User.query.get(int(user_id))
+
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    error = ''
+    form = CreatePostForm()
+    email = form.email.data
+    password = form.password.data
+    user = User.query.filter_by(email=email).first()
+    if not user:
+        flash("The provided email is not registered!!")
+        # error = "User doesn't exist"
+    elif not check_password_hash(user.password, password):
+        error = 'Password Incorrect'
+    elif user and check_password_hash(user.password, password):
+        login_user(user=user)
+        flash("You were successfully logged in!!")
+        return redirect(url_for('get_all_posts'))
+    else:
+        error = 'Unsuccessful, Password did not match'
+    return render_template("login.html", error=error, form=form)
+
+
+@app.route('/logout')
+@login_required
+def logout():
+    logout_user()
+    return redirect(url_for('login'))
+
+
+@app.route('/')
 def get_all_posts():
-    posts = db.session.execute(db.select(BlogPost)).scalars().all()
-    post_list = []
-    for post in posts:
-        post_list.append({
-            "id": post.id,
-            "title": post.title,
-            "subtitle": post.subtitle,
-            "date": post.date,
-            "body": post.body,
-            "author": post.author,
-            "img_url": post.img_url
-        })
-    return render_template("index.html", all_posts=post_list)
+    result = db.session.execute(db.select(BlogPost))
+    posts = result.scalars().all()
+    return render_template("index.html", all_posts=posts)
 
 
-@app.route('/<int:post_id>', methods=['GET'])
+# TODO: Allow logged-in users to comment on posts
+@admin_required
+@app.route("/post/<int:post_id>")
 def show_post(post_id):
     requested_post = db.get_or_404(BlogPost, post_id)
     return render_template("post.html", post=requested_post)
 
 
-@app.route('/add', methods=['GET', 'POST'])
+# TODO: Use a decorator so only an admin user can create a new post
+@admin_required
+@app.route("/new-post", methods=["GET", "POST"])
 def add_new_post():
     form = NewPost()
     if form.validate_on_submit():
@@ -102,7 +159,9 @@ def add_new_post():
     return render_template('make-post.html', form=form)
 
 
-@app.route('/edit/<int:post_id>', methods=['GET', 'POST'])
+@admin_required
+@app.route("/edit-post/<int:post_id>", methods=["GET", "POST"])
+
 def edit_post(post_id):
     post = BlogPost.query.get_or_404(post_id)
     edit_form = NewPost(obj=post)
@@ -119,25 +178,17 @@ def edit_post(post_id):
     return render_template("make-post.html", form=edit_form, is_edit=True)
 
 
-@app.route('/delete/<post_id>',methods=['GET'])
+
+@admin_required
+@app.route("/delete/<int:post_id>")
 def delete_post(post_id):
-    post = db.get_or_404(BlogPost, post_id)
-    db.session.delete(post)
+    print(post_id)
+    post_to_delete = db.get_or_404(BlogPost, post_id)
+    db.session.delete(post_to_delete)
     db.session.commit()
+    return redirect(url_for('get_all_posts'))
 
-    deleted_post = DeletedPost(id=post.id, title=post.title, subtitle=post.subtitle, date=post.date, body=post.body,
-                               author=post.author, img_url=post.img_url)
-    db.session.add(deleted_post)
-    db.session.commit()
-    return redirect('/')
 
-@app.route('/older_posts', methods=['GET'])
-def older_posts():
-    # Query all deleted posts
-    deleted_posts = DeletedPost.query.all()
-    return render_template('older_posts.html', deleted_posts=deleted_posts)
-
-# Below is the code from previous lessons. No changes needed.
 @app.route("/about")
 def about():
     return render_template("about.html")
@@ -149,4 +200,6 @@ def contact():
 
 
 if __name__ == "__main__":
-    app.run(debug=True, port=5003)
+    with app.app_context():
+        db.create_all()
+    app.run(debug=True, port=5002)
