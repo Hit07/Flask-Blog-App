@@ -1,19 +1,15 @@
-from datetime import date
+from datetime import date, datetime
 from functools import wraps
-
 from flask import Flask, abort, render_template, redirect, url_for, flash, session
 from flask_bootstrap import Bootstrap5
-from flask_ckeditor import CKEditor, CKEditorField
+from flask_ckeditor import CKEditor
+from flask_gravatar import Gravatar
 from flask_login import UserMixin, login_user, LoginManager, current_user, logout_user, login_required
 from flask_sqlalchemy import SQLAlchemy
-from flask_wtf import FlaskForm
-from sqlalchemy import Integer, String, Text
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy import Integer, String, Text, ForeignKey
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from werkzeug.security import generate_password_hash, check_password_hash
-from wtforms.fields.simple import StringField, SubmitField
-from wtforms.validators import DataRequired, URL
-
-from forms import CreatePostForm
+from forms import CreatePostForm, NewPost, CommentForm
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = '8BYkEfBA6O6donzWlSihBXox7C0sKR6b'
@@ -30,45 +26,62 @@ class Base(DeclarativeBase):
     pass
 
 
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///post.db'
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///blog_posts.db'
 db = SQLAlchemy(model_class=Base)
 db.init_app(app)
 
+gravatar = Gravatar(app,
+                    size=100,
+                    rating='g',
+                    default='retro',
+                    force_default=False,
+                    force_lower=False,
+                    use_ssl=False,
+                    base_url=None)
 
 # CONFIGURE TABLES
+class User(UserMixin, db.Model):
+    __tablename__ = "users"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    email: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
+    password: Mapped[str] = mapped_column(String(100), nullable=False)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    posts = relationship("BlogPost", back_populates="author")
+    comments = relationship("Comment", back_populates="comment_author")
+
+
 class BlogPost(db.Model):
     __tablename__ = "blog_posts"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    author_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    author_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
+    author = relationship("User", back_populates="posts")
     title: Mapped[str] = mapped_column(String(250), unique=True, nullable=False)
     subtitle: Mapped[str] = mapped_column(String(250), nullable=False)
     date: Mapped[str] = mapped_column(String(250), nullable=False)
     body: Mapped[str] = mapped_column(Text, nullable=False)
-    author: Mapped[str] = mapped_column(String(250), nullable=False)
     img_url: Mapped[str] = mapped_column(String(250), nullable=False)
+    comments = relationship("Comment", back_populates="parent_post")
 
 
-class User(UserMixin, db.Model):
-    __tablename__ = 'users'
+class Comment(db.Model):
+    __tablename__ = "comments"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    name: Mapped[str] = mapped_column(String(50), unique=True, nullable=False)
-    email: Mapped[str] = mapped_column(String(120), unique=True, nullable=False)
-    password: Mapped[str] = mapped_column(String(60), nullable=False)
+    author_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
+    comment_author = relationship("User", back_populates="comments")
+    post_id: Mapped[int] = mapped_column(Integer, ForeignKey("blog_posts.id"), nullable=False)
+    parent_post = relationship("BlogPost", back_populates="comments")
+    text: Mapped[str] = mapped_column(Text, nullable=False)
 
-class NewPost(FlaskForm):
-    title = StringField("Blog Post Title", validators=[DataRequired()])
-    subtitle = StringField("Subtitle", validators=[DataRequired()])
-    author = StringField("Your Name", validators=[DataRequired()])
-    img_url = StringField("Blog Image URL", validators=[DataRequired(), URL()])
-    body = CKEditorField("Blog Content", validators=[DataRequired()])
-    submit = SubmitField("Submit Post")
+
+# **************************CODE********************************
 
 
 def admin_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
         if 'user_id' not in session or session['user_id'] != 1:
-            abort(403)  # Forbidden
+            # Forbidden
+            abort(403)
         return f(*args, **kwargs)
 
     return decorated_function
@@ -124,6 +137,7 @@ def logout():
     return redirect(url_for('login'))
 
 
+@admin_required
 @app.route('/')
 def get_all_posts():
     result = db.session.execute(db.select(BlogPost))
@@ -132,14 +146,30 @@ def get_all_posts():
 
 
 # TODO: Allow logged-in users to comment on posts
-@admin_required
-@app.route("/post/<int:post_id>")
+@app.route("/post/<int:post_id>", methods=["GET", "POST"])
 def show_post(post_id):
+    comment_form = CommentForm()
     requested_post = db.get_or_404(BlogPost, post_id)
-    return render_template("post.html", post=requested_post)
+    comments = Comment.query.filter_by(post_id=post_id).all()
+    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    if comment_form.validate_on_submit():
+        if not current_user.is_authenticated:
+            flash("You need to be logged in to comment.")
+            return redirect(url_for('login'))
+
+        new_comment = Comment(
+            text=comment_form.comment.data,
+            comment_author=current_user,
+            parent_post=requested_post
+        )
+        db.session.add(new_comment)
+        db.session.commit()
+        return redirect(url_for('show_post', post_id=post_id))
+
+    return render_template("post.html", post=requested_post, form=comment_form, comments=comments,
+                           current_user=current_user,time=current_time,gravatar=gravatar)
 
 
-# TODO: Use a decorator so only an admin user can create a new post
 @admin_required
 @app.route("/new-post", methods=["GET", "POST"])
 def add_new_post():
@@ -150,7 +180,7 @@ def add_new_post():
             subtitle=form.subtitle.data,
             date=date.today().strftime("%Y-%m-%d"),
             body=form.body.data,
-            author=form.author.data,
+            author_id=form.author_id.data,
             img_url=form.img_url.data
         )
         db.session.add(new_post)
@@ -161,7 +191,6 @@ def add_new_post():
 
 @admin_required
 @app.route("/edit-post/<int:post_id>", methods=["GET", "POST"])
-
 def edit_post(post_id):
     post = BlogPost.query.get_or_404(post_id)
     edit_form = NewPost(obj=post)
@@ -170,13 +199,12 @@ def edit_post(post_id):
         post.title = edit_form.title.data
         post.subtitle = edit_form.subtitle.data
         post.img_url = edit_form.img_url.data
-        post.author = edit_form.author.data
+        post.author_id = edit_form.author_id.data
         post.body = edit_form.body.data
         db.session.commit()
         return redirect(url_for('show_post', post_id=post_id))
 
     return render_template("make-post.html", form=edit_form, is_edit=True)
-
 
 
 @admin_required
